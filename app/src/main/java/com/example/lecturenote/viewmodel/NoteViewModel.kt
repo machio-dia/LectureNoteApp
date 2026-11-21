@@ -46,6 +46,8 @@ data class NoteUiState(
     val selectedPenColorInt: Int = PenColor.BLACK.colorInt,
     val selectedPenWidth: Float = 4.2f,
     val isDashedLine: Boolean = false,
+    val axesOriginFx: Float = 0.5f,
+    val axesOriginFy: Float = 0.5f,
     val selectedHlColorInt: Int = PenColor.HL_YELLOW.colorInt,
     val selectedHlWidth: Float = 24.0f,
     val isStylusOnlyMode: Boolean = true,
@@ -266,6 +268,17 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
             selectedShapeMode = mode,
             currentTool = ToolType.LINE_SHAPE,
             previousWritingTool = ToolType.LINE_SHAPE,
+            activePresetId = null
+        )
+    }
+
+    /** これから描くXY軸の原点位置（枠の左上=0,0 / 右下=1,1） */
+    fun setAxesOrigin(fx: Float, fy: Float) {
+        _uiState.value = _uiState.value.copy(
+            axesOriginFx = fx,
+            axesOriginFy = fy,
+            currentTool = ToolType.XY_AXES,
+            previousWritingTool = ToolType.XY_AXES,
             activePresetId = null
         )
     }
@@ -649,6 +662,8 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
             val finalSummaries = repository.loadAllNoteSummaries()
             withContext(Dispatchers.Main) {
                 _uiState.value = _uiState.value.copy(
+                    // 開いていたノート自体を削除した場合は、別の生徒のノートを突然表示せずホームへ戻る
+                    isShowingLandingPage = _uiState.value.isShowingLandingPage || currentActive.id == docId,
                     activeDocument = nextActive,
                     noteSummaries = finalSummaries,
                     currentVisiblePage = 1,
@@ -669,7 +684,12 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
-    fun onExportFolderSelected(context: Context, treeUri: Uri) {
+    /**
+     * PDF保存先フォルダが選択されたとき。
+     * exportDocId が指定されている場合のみ、そのノートを続けてPDF出力する
+     * （保存先を設定しただけで勝手に書き出されることはない）。
+     */
+    fun onExportFolderSelected(context: Context, treeUri: Uri, exportDocId: String? = null) {
         try {
             val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
             context.contentResolver.takePersistableUriPermission(treeUri, flags)
@@ -679,7 +699,13 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
         repository.saveExportTreeUri(uriStr)
         _uiState.value = _uiState.value.copy(savedExportTreeUri = uriStr)
 
-        exportToTreeUri(context, _uiState.value.activeDocument, treeUri)
+        if (exportDocId == null) {
+            showMessage("PDFの保存先を設定しました")
+        } else {
+            exportNoteSummaryToPdf(context, exportDocId) {
+                showMessage("PDFを書き出せませんでした。保存先フォルダを確認してください")
+            }
+        }
     }
 
     fun exportToRememberedFolderOrRequestPicker(

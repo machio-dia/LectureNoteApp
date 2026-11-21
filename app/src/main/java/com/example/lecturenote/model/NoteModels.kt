@@ -26,7 +26,8 @@ enum class ToolType(val label: String) {
     XY_AXES("XY軸"),
     LASER_POINTER("ポインター"),
     STROKE_ERASER("消しゴム"),
-    LASSO("投げ縄")
+    LASSO("投げ縄"),
+    COVER("目隠し")
 }
 
 enum class EraserMode(val label: String) {
@@ -40,15 +41,22 @@ enum class ShapeMode(val label: String) {
     RECTANGLE("四角"),
     CIRCLE("円"),
     PARABOLA("二次関数"),
-    XY_AXES_SHAPE("XY軸")
+    XY_AXES_SHAPE("XY軸"),
+    TRIANGLE("三角形"),
+    RIGHT_TRIANGLE("直角三角形"),
+    NUMBER_LINE("数直線"),
+    CROSSED_RECT("四角に×"),
+
+    /** 目隠し（塗りつぶしの四角）。図形メニューには出さず、目隠しツールから作る */
+    MASK("目隠し")
 }
 
-enum class BackgroundTemplate(val label: String) {
-    RULED_7MM("横罫線 (A罫・7mm)"),
-    RULED_6MM("横罫線 (B罫・6mm)"),
-    GRID_5MM("方眼 (5mm)"),
-    CORNELL("コーネル式ノート"),
-    BLANK("無地")
+enum class BackgroundTemplate(val label: String, val shortLabel: String) {
+    RULED_7MM("横罫線 (A罫・7mm)", "A罫 7mm"),
+    RULED_6MM("横罫線 (B罫・6mm)", "B罫 6mm"),
+    GRID_5MM("方眼 (5mm)", "方眼"),
+    CORNELL("コーネル式ノート", "コーネル式"),
+    BLANK("無地", "無地")
 }
 
 data class PenColor(
@@ -147,9 +155,42 @@ data class Stroke(
     val toolType: ToolType,
     val shapeMode: ShapeMode? = null,
     val isDashed: Boolean = false,
-    val rotationDeg: Float = 0f
+    val rotationDeg: Float = 0f,
+    /** XY軸の原点位置（枠の左上を 0,0・右下を 1,1 とした割合）。XY軸以外では使わない */
+    val originFx: Float = 0.5f,
+    val originFy: Float = 0.5f
 ) {
-    val path: Path = buildStrokePath(points, shapeMode, rotationDeg)
+    val path: Path = buildStrokePath(points, shapeMode, rotationDeg, originFx, originFy)
+
+    val isMask: Boolean get() = shapeMode == ShapeMode.MASK
+
+    /** 図形の枠（ドラッグ開始点と終了点で決まる長方形） */
+    fun shapeBox(): RectF {
+        val a = points.first()
+        val b = points.last()
+        return RectF(min(a.x, b.x), min(a.y, b.y), max(a.x, b.x), max(a.y, b.y))
+    }
+
+    /** XY軸の原点の座標 */
+    fun axesOriginPoint(): NotePoint {
+        val box = shapeBox()
+        return NotePoint(
+            box.left + box.width() * originFx.coerceIn(0f, 1f),
+            box.top + box.height() * originFy.coerceIn(0f, 1f)
+        )
+    }
+
+    /** XY軸の原点だけを動かした新しいStrokeを返す */
+    fun withAxesOrigin(fx: Float, fy: Float): Stroke {
+        val mode = shapeMode ?: return this
+        val nfx = fx.coerceIn(0f, 1f)
+        val nfy = fy.coerceIn(0f, 1f)
+        return copy(
+            points = generateShapePoints(points.first(), points.last(), mode, nfx, nfy),
+            originFx = nfx,
+            originFy = nfy
+        )
+    }
 
     val bounds: RectF = RectF().apply {
         path.computeBounds(this, true)
@@ -208,7 +249,7 @@ data class Stroke(
             val halfH = (end.y - start.y) * 0.5f * clampedScale
             val newStart = NotePoint(newCx - halfW, newCy - halfH)
             val newEnd = NotePoint(newCx + halfW, newCy + halfH)
-            val newPoints = generateShapePoints(newStart, newEnd, shapeMode)
+            val newPoints = generateShapePoints(newStart, newEnd, shapeMode, originFx, originFy)
 
             copy(
                 id = keepId,
@@ -258,6 +299,7 @@ data class Stroke(
         y2: Float,
         eraserRadius: Float
     ): List<Stroke>? {
+        if (isMask) return null
         val effectiveRadius = eraserRadius + strokeWidth * 0.45f
         val segLeft = min(x1, x2) - effectiveRadius
         val segRight = max(x1, x2) + effectiveRadius
@@ -317,6 +359,8 @@ data class Stroke(
     }
 
     companion object {
+        private const val NUMBER_LINE_DIVISIONS = 10
+
         /**
          * 直線ホールド時や直線・矢印ツール時に、5度刻み（0°, 5°, 10°, 15°...）で角度が張り付くスナップ処理
          */
@@ -338,7 +382,9 @@ data class Stroke(
         fun buildStrokePath(
             points: List<NotePoint>,
             shapeMode: ShapeMode?,
-            rotationDeg: Float = 0f
+            rotationDeg: Float = 0f,
+            originFx: Float = 0.5f,
+            originFy: Float = 0.5f
         ): Path {
             val p = Path()
             if (points.isEmpty()) return p
@@ -356,12 +402,18 @@ data class Stroke(
                         p.lineTo(end.x, end.y)
                         addArrowHead(p, start.x, start.y, end.x, end.y, headLen = 28.0)
                     }
-                    ShapeMode.RECTANGLE -> {
+                    ShapeMode.RECTANGLE, ShapeMode.MASK, ShapeMode.CROSSED_RECT -> {
                         val left = min(start.x, end.x)
                         val right = max(start.x, end.x)
                         val top = min(start.y, end.y)
                         val bottom = max(start.y, end.y)
                         p.addRect(left, top, right, bottom, Path.Direction.CW)
+                        if (shapeMode == ShapeMode.CROSSED_RECT) {
+                            p.moveTo(left, top)
+                            p.lineTo(right, bottom)
+                            p.moveTo(right, top)
+                            p.lineTo(left, bottom)
+                        }
                     }
                     ShapeMode.CIRCLE -> {
                         val (left, top, right, bottom) = computeCircleOrOvalBounds(start, end)
@@ -381,16 +433,48 @@ data class Stroke(
                         val right = max(start.x, end.x)
                         val top = min(start.y, end.y)
                         val bottom = max(start.y, end.y)
-                        val cx = (left + right) / 2f
-                        val cy = (top + bottom) / 2f
-
+                        // 矢印なしの十字。原点は枠内の好きな位置に置ける
+                        val ox = left + (right - left) * originFx.coerceIn(0f, 1f)
+                        val oy = top + (bottom - top) * originFy.coerceIn(0f, 1f)
+                        p.moveTo(left, oy)
+                        p.lineTo(right, oy)
+                        p.moveTo(ox, bottom)
+                        p.lineTo(ox, top)
+                    }
+                    ShapeMode.TRIANGLE -> {
+                        // 二等辺三角形: ドラッグ開始側が頂点、終了側が底辺
+                        val cx = (start.x + end.x) / 2f
+                        p.moveTo(cx, start.y)
+                        p.lineTo(end.x, end.y)
+                        p.lineTo(start.x, end.y)
+                        p.close()
+                    }
+                    ShapeMode.RIGHT_TRIANGLE -> {
+                        // 直角三角形: 直角は (開始X, 終了Y) の位置
+                        p.moveTo(start.x, start.y)
+                        p.lineTo(start.x, end.y)
+                        p.lineTo(end.x, end.y)
+                        p.close()
+                    }
+                    ShapeMode.NUMBER_LINE -> {
+                        // 数直線: 両端矢印＋等間隔の目盛り11本（中央が原点）
+                        val left = min(start.x, end.x)
+                        val right = max(start.x, end.x)
+                        val cy = (start.y + end.y) / 2f
                         p.moveTo(left, cy)
                         p.lineTo(right, cy)
-                        addArrowHead(p, left, cy, right, cy, headLen = 22.0)
-
-                        p.moveTo(cx, bottom)
-                        p.lineTo(cx, top)
-                        addArrowHead(p, cx, bottom, cx, top, headLen = 22.0)
+                        addArrowHead(p, left, cy, right, cy, headLen = 20.0)
+                        addArrowHead(p, right, cy, left, cy, headLen = 20.0)
+                        val inset = 36f
+                        val usable = (right - left) - inset * 2f
+                        if (usable > 60f) {
+                            for (i in 0..NUMBER_LINE_DIVISIONS) {
+                                val x = left + inset + usable * i / NUMBER_LINE_DIVISIONS
+                                val h = if (i == NUMBER_LINE_DIVISIONS / 2) 18f else 10f
+                                p.moveTo(x, cy - h)
+                                p.lineTo(x, cy + h)
+                            }
+                        }
                     }
                 }
 
@@ -451,10 +535,16 @@ data class Stroke(
             return floatArrayOf(left, top, left + w, top + h)
         }
 
-        fun generateShapePoints(start: NotePoint, end: NotePoint, mode: ShapeMode): List<NotePoint> {
+        fun generateShapePoints(
+            start: NotePoint,
+            end: NotePoint,
+            mode: ShapeMode,
+            originFx: Float = 0.5f,
+            originFy: Float = 0.5f
+        ): List<NotePoint> {
             return when (mode) {
                 ShapeMode.LINE, ShapeMode.ARROW -> interpolateSegment(start, end, stepPx = 18f)
-                ShapeMode.RECTANGLE -> {
+                ShapeMode.RECTANGLE, ShapeMode.MASK, ShapeMode.CROSSED_RECT -> {
                     val left = min(start.x, end.x)
                     val right = max(start.x, end.x)
                     val top = min(start.y, end.y)
@@ -469,6 +559,10 @@ data class Stroke(
                         addAll(interpolateSegment(tr, br, 20f))
                         addAll(interpolateSegment(br, bl, 20f))
                         addAll(interpolateSegment(bl, tl, 20f))
+                        if (mode == ShapeMode.CROSSED_RECT) {
+                            addAll(interpolateSegment(tl, br, 20f))
+                            addAll(interpolateSegment(tr, bl, 20f))
+                        }
                         add(end)
                     }
                 }
@@ -512,12 +606,44 @@ data class Stroke(
                     val right = max(start.x, end.x)
                     val top = min(start.y, end.y)
                     val bottom = max(start.y, end.y)
-                    val cx = (left + right) / 2f
-                    val cy = (top + bottom) / 2f
+                    val cx = left + (right - left) * originFx.coerceIn(0f, 1f)
+                    val cy = top + (bottom - top) * originFy.coerceIn(0f, 1f)
                     buildList {
                         add(start)
                         addAll(interpolateSegment(NotePoint(left, cy), NotePoint(right, cy), 20f))
                         addAll(interpolateSegment(NotePoint(cx, bottom), NotePoint(cx, top), 20f))
+                        add(end)
+                    }
+                }
+                ShapeMode.TRIANGLE -> {
+                    val apex = NotePoint((start.x + end.x) / 2f, start.y)
+                    val baseA = NotePoint(end.x, end.y)
+                    val baseB = NotePoint(start.x, end.y)
+                    buildList {
+                        add(start)
+                        addAll(interpolateSegment(apex, baseA, 20f))
+                        addAll(interpolateSegment(baseA, baseB, 20f))
+                        addAll(interpolateSegment(baseB, apex, 20f))
+                        add(end)
+                    }
+                }
+                ShapeMode.RIGHT_TRIANGLE -> {
+                    val corner = NotePoint(start.x, end.y)
+                    buildList {
+                        add(start)
+                        addAll(interpolateSegment(start, corner, 20f))
+                        addAll(interpolateSegment(corner, end, 20f))
+                        addAll(interpolateSegment(end, start, 20f))
+                        add(end)
+                    }
+                }
+                ShapeMode.NUMBER_LINE -> {
+                    val left = min(start.x, end.x)
+                    val right = max(start.x, end.x)
+                    val cy = (start.y + end.y) / 2f
+                    buildList {
+                        add(start)
+                        addAll(interpolateSegment(NotePoint(left, cy), NotePoint(right, cy), 20f))
                         add(end)
                     }
                 }

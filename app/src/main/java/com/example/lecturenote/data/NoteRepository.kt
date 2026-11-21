@@ -42,6 +42,10 @@ class NoteRepository(private val context: Context) {
 
         private const val BIN_MAGIC = 0x4C4E4F54 // "LNOT"
         private const val BIN_VERSION = 4
+
+        // 本体の後ろに付ける追加情報の目印（"ORG1"）。
+        // 旧バージョンのアプリは本体だけ読んで後ろを無視するため、旧版でも同じファイルを開ける
+        private const val TRAILER_AXES_ORIGIN = 0x4F524731
     }
 
     fun getCustomStylusKeyCode(): Int = prefs.getInt(KEY_CUSTOM_STYLUS_KEYCODE, -1)
@@ -330,6 +334,17 @@ class NoteRepository(private val context: Context) {
                         }
                     }
                 }
+
+                // 追加情報: XY軸の原点位置（中央以外のものだけ）
+                val withOrigin = doc.pages.flatMap { it.strokes }
+                    .filter { it.originFx != 0.5f || it.originFy != 0.5f }
+                out.writeInt(TRAILER_AXES_ORIGIN)
+                out.writeInt(withOrigin.size)
+                for (s in withOrigin) {
+                    out.writeUTF(s.id)
+                    out.writeFloat(s.originFx)
+                    out.writeFloat(s.originFy)
+                }
                 out.flush()
             }
             if (targetFile.exists()) targetFile.delete()
@@ -405,6 +420,27 @@ class NoteRepository(private val context: Context) {
                     pages.add(Page(pageNumber = pageNumber, strokes = strokes))
                 }
                 if (pages.isEmpty()) pages.add(Page(1))
+
+                // 追加情報（無いファイル＝旧バージョンで保存されたものは、そのまま読み終える）
+                try {
+                    if (inp.readInt() == TRAILER_AXES_ORIGIN) {
+                        val count = inp.readInt()
+                        val origins = HashMap<String, Pair<Float, Float>>(count.coerceIn(0, 4096))
+                        for (i in 0 until count) {
+                            origins[inp.readUTF()] = inp.readFloat() to inp.readFloat()
+                        }
+                        if (origins.isNotEmpty()) {
+                            for (page in pages) {
+                                for (i in page.strokes.indices) {
+                                    val o = origins[page.strokes[i].id] ?: continue
+                                    page.strokes[i] = page.strokes[i].copy(originFx = o.first, originFy = o.second)
+                                }
+                            }
+                        }
+                    }
+                } catch (_: java.io.IOException) {
+                    // 追加情報なし
+                }
 
                 LectureNoteDocument(
                     id = id,

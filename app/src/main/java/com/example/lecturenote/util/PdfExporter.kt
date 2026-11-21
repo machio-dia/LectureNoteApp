@@ -121,7 +121,8 @@ object PdfExporter {
                 drawPdfTemplate(canvas, doc, index, doc.pages.size, headerPaint, gridPaint, guidePaint)
 
                 val highlighters = page.strokes.filter { it.toolType == ToolType.HIGHLIGHTER }
-                val pens = page.strokes.filter { it.toolType != ToolType.HIGHLIGHTER }
+                // 目隠しは授業中の表示用なので、PDFには出さない（隠していた内容もそのまま出力する）
+                val pens = page.strokes.filter { it.toolType != ToolType.HIGHLIGHTER && !it.isMask }
 
                 for (stroke in highlighters) {
                     strokePaint.strokeWidth = stroke.strokeWidth
