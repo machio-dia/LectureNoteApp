@@ -54,6 +54,8 @@ class LectureCanvasView @JvmOverloads constructor(
         private const val LASER_TRAIL_LIFETIME_MS = 850L
         private const val ROTATE_HANDLE_OFFSET = 44f
         private const val HANDLE_HIT_RADIUS = 36f
+        private const val MASK_BADGE_RADIUS = 20f
+        private val MASK_COLOR = Color.parseColor("#2A3040")
     }
 
     private enum class LassoDragMode {
@@ -61,7 +63,8 @@ class LectureCanvasView @JvmOverloads constructor(
         DRAW_LASSO,
         MOVE,
         SCALE,
-        ROTATE
+        ROTATE,
+        AXES_ORIGIN
     }
 
     // 現在のツール・描画設定
@@ -74,6 +77,16 @@ class LectureCanvasView @JvmOverloads constructor(
     var isDashedLine: Boolean = false
     var isStylusOnlyMode: Boolean = true
     var isZoomLocked: Boolean = false
+
+    /** これから描くXY軸の原点位置（枠の左上=0,0 / 右下=1,1） */
+    var axesOriginFx: Float = 0.5f
+    var axesOriginFy: Float = 0.5f
+
+    // 目隠し（範囲指定）: 作成中のドラッグ範囲と、今だけ開いて見せている目隠し
+    private var coverPageIndex: Int = 0
+    private var coverStart: NotePoint? = null
+    private var coverCurrent: NotePoint? = null
+    private val revealedMaskIds = mutableSetOf<String>()
 
     // 表示中のノートドキュメント
     private var document: LectureNoteDocument? = null
@@ -193,21 +206,21 @@ class LectureCanvasView @JvmOverloads constructor(
     private var wasBarrelButtonDown: Boolean = false
 
     // Paint定義
-    private val canvasBgColor = Color.parseColor("#E2E8F0")
+    private val canvasBgColor = Color.parseColor("#E9EBEF")
     private val pageBgPaint = Paint().apply {
         color = Color.WHITE
         style = Paint.Style.FILL
     }
     private val pageShadowPaint = Paint().apply {
-        color = Color.parseColor("#94A3B8")
+        color = Color.parseColor("#CDD2DA")
         style = Paint.Style.STROKE
-        strokeWidth = 2.5f
+        strokeWidth = 2f
         isAntiAlias = true
     }
     private val pageDividerTextPaint = Paint().apply {
         isAntiAlias = true
-        color = Color.parseColor("#475569")
-        textSize = 22f
+        color = Color.parseColor("#8A93A2")
+        textSize = 20f
         textAlign = Paint.Align.CENTER
         typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
     }
@@ -275,6 +288,45 @@ class LectureCanvasView @JvmOverloads constructor(
         color = Color.parseColor("#10B981")
         style = Paint.Style.STROKE
         strokeWidth = 3.0f
+    }
+    private val axesOriginHandlePaint = Paint().apply {
+        isAntiAlias = true
+        color = Color.parseColor("#F59E0B")
+        style = Paint.Style.FILL
+    }
+    private val maskFillPaint = Paint().apply {
+        isAntiAlias = true
+        color = MASK_COLOR
+        style = Paint.Style.FILL
+    }
+    private val maskRevealedFillPaint = Paint().apply {
+        isAntiAlias = true
+        color = Color.parseColor("#142A3040")
+        style = Paint.Style.FILL
+    }
+    private val maskOutlinePaint = Paint().apply {
+        isAntiAlias = true
+        color = Color.parseColor("#5B6472")
+        style = Paint.Style.STROKE
+        strokeWidth = 3f
+        pathEffect = DashPathEffect(floatArrayOf(14f, 10f), 0f)
+    }
+    private val maskPreviewPaint = Paint().apply {
+        isAntiAlias = true
+        color = Color.parseColor("#992A3040")
+        style = Paint.Style.FILL
+    }
+    private val maskBadgePaint = Paint().apply {
+        isAntiAlias = true
+        color = Color.parseColor("#DC2626")
+        style = Paint.Style.FILL
+    }
+    private val maskBadgeCrossPaint = Paint().apply {
+        isAntiAlias = true
+        color = Color.WHITE
+        style = Paint.Style.STROKE
+        strokeWidth = 4f
+        strokeCap = Paint.Cap.ROUND
     }
     private val pasteTargetPaint = Paint().apply {
         isAntiAlias = true
@@ -346,6 +398,7 @@ class LectureCanvasView @JvmOverloads constructor(
         lastRenderedHeaderKey = headerKey
 
         if (isNewDoc) {
+            revealedMaskIds.clear()
             invalidateScreenCache()
             clearLassoSelection()
             pendingPastePoint = null
@@ -452,6 +505,18 @@ class LectureCanvasView @JvmOverloads constructor(
         lassoPageIndex = lassoPageIndex.coerceIn(0, max(0, doc.pages.lastIndex))
         clearLassoSelection()
         clampPanBounds()
+        invalidate()
+        onViewportChanged?.invoke()
+    }
+
+    /** 指定ページの先頭が画面上端に来るようにスクロールする（ページ一覧からのジャンプ用） */
+    fun scrollToPage(pageIndex: Int) {
+        val doc = document ?: return
+        if (doc.pages.isEmpty()) return
+        val idx = pageIndex.coerceIn(0, doc.pages.lastIndex)
+        panY = 24f - idx * (PAGE_HEIGHT + PAGE_GAP) * scaleFactor
+        clampPanBounds()
+        invalidateScreenCache()
         invalidate()
         onViewportChanged?.invoke()
     }
@@ -675,7 +740,9 @@ class LectureCanvasView @JvmOverloads constructor(
     }
 
     private fun appendStrokeToScreenCache(pageIdx: Int, stroke: Stroke) {
-        if (stroke.toolType == ToolType.HIGHLIGHTER) {
+        // マーカーは下に、目隠しは上に重なるため、どちらかが絡むときは全体を描き直す
+        val pageHasMask = document?.pages?.getOrNull(pageIdx)?.strokes?.any { it.isMask } == true
+        if (stroke.toolType == ToolType.HIGHLIGHTER || pageHasMask) {
             invalidateScreenCache()
             return
         }
@@ -713,7 +780,7 @@ class LectureCanvasView @JvmOverloads constructor(
                 val bannerScreenY = bannerY * scaleFactor + panY
                 if (bannerScreenY in -60f..(height + 60f)) {
                     canvas.drawText(
-                        "─── ▼ Page ${pageIdx + 1} / ${doc.pages.size} （下のページ） ▼ ───",
+                        "Page ${pageIdx + 1} / ${doc.pages.size}",
                         PAGE_WIDTH / 2f,
                         bannerY,
                         pageDividerTextPaint
@@ -755,10 +822,18 @@ class LectureCanvasView @JvmOverloads constructor(
 
             for (i in 0 until page.strokes.size) {
                 val stroke = page.strokes[i]
-                if (stroke.toolType != ToolType.HIGHLIGHTER &&
+                if (stroke.toolType != ToolType.HIGHLIGHTER && !stroke.isMask &&
                     RectF.intersects(visiblePageDocRect, stroke.bounds)
                 ) {
                     drawSingleStroke(canvas, stroke)
+                }
+            }
+
+            // 目隠しはすべての書き込みの上に描く
+            for (i in 0 until page.strokes.size) {
+                val stroke = page.strokes[i]
+                if (stroke.isMask && RectF.intersects(visiblePageDocRect, stroke.bounds)) {
+                    drawMask(canvas, stroke)
                 }
             }
 
@@ -775,7 +850,8 @@ class LectureCanvasView @JvmOverloads constructor(
 
         val isTransformingSelection = lassoDragMode == LassoDragMode.MOVE ||
             lassoDragMode == LassoDragMode.SCALE ||
-            lassoDragMode == LassoDragMode.ROTATE
+            lassoDragMode == LassoDragMode.ROTATE ||
+            lassoDragMode == LassoDragMode.AXES_ORIGIN
 
         if (isMultiTouchPanningOrZooming || isTransformingSelection) {
             renderVectorDocumentToCanvas(canvas, doc)
@@ -792,7 +868,10 @@ class LectureCanvasView @JvmOverloads constructor(
         val hasEraserOverlay = isEraserTouching && lastEraserPoint != null
         val hasPasteTargetOverlay = currentTool == ToolType.LASSO && clipboardStrokes.isNotEmpty() && pendingPastePoint != null && selectedStrokeIds.isEmpty()
 
+        val hasCoverPreview = coverStart != null && coverCurrent != null
+
         if (currentPoints.isNotEmpty() ||
+            hasCoverPreview ||
             lassoPoints.isNotEmpty() ||
             selectionBounds != null ||
             hasLaserOverlay ||
@@ -825,6 +904,20 @@ class LectureCanvasView @JvmOverloads constructor(
                     else -> {}
                 }
                 canvas.restore()
+            }
+
+            if (hasCoverPreview) {
+                val s0 = coverStart
+                val e0 = coverCurrent
+                if (s0 != null && e0 != null) {
+                    canvas.save()
+                    canvas.translate(0f, coverPageIndex * (PAGE_HEIGHT + PAGE_GAP))
+                    canvas.drawRect(
+                        min(s0.x, e0.x), min(s0.y, e0.y), max(s0.x, e0.x), max(s0.y, e0.y),
+                        maskPreviewPaint
+                    )
+                    canvas.restore()
+                }
             }
 
             if (hasEraserOverlay) {
@@ -891,6 +984,13 @@ class LectureCanvasView @JvmOverloads constructor(
                         canvas.drawCircle(cx, cy, r, handleFillWhitePaint)
                         canvas.drawCircle(cx, cy, r, scaleHandleStrokePaint)
                     }
+
+                    // XY軸をひとつだけ選んでいるとき: 原点を動かすオレンジのハンドル
+                    singleSelectedAxes(doc.pages.getOrNull(lassoPageIndex))?.let { axes ->
+                        val o = axes.axesOriginPoint()
+                        canvas.drawCircle(o.x, o.y, 16f, handleFillWhitePaint)
+                        canvas.drawCircle(o.x, o.y, 12f, axesOriginHandlePaint)
+                    }
                 }
                 canvas.restore()
             }
@@ -926,6 +1026,136 @@ class LectureCanvasView @JvmOverloads constructor(
                 canvas.drawCircle(tip.x, tip.y, 6f, laserTipCenterPaint)
             }
         }
+    }
+
+    private fun drawMask(canvas: Canvas, stroke: Stroke) {
+        if (stroke.id in revealedMaskIds) {
+            canvas.drawPath(stroke.path, maskRevealedFillPaint)
+            canvas.drawPath(stroke.path, maskOutlinePaint)
+            // 開いている間だけ、右上に削除用の×を出す
+            val box = stroke.shapeBox()
+            val r = MASK_BADGE_RADIUS
+            canvas.drawCircle(box.right, box.top, r, maskBadgePaint)
+            val d = r * 0.4f
+            canvas.drawLine(box.right - d, box.top - d, box.right + d, box.top + d, maskBadgeCrossPaint)
+            canvas.drawLine(box.right + d, box.top - d, box.right - d, box.top + d, maskBadgeCrossPaint)
+        } else {
+            canvas.drawPath(stroke.path, maskFillPaint)
+        }
+    }
+
+    // --- 目隠し（範囲指定）の操作 ---
+
+    /** すべてのページの目隠しを開く（true）／隠し直す（false） */
+    fun setAllCoversRevealed(revealed: Boolean) {
+        val doc = document ?: return
+        revealedMaskIds.clear()
+        if (revealed) {
+            doc.pages.forEach { page ->
+                page.strokes.forEach { if (it.isMask) revealedMaskIds.add(it.id) }
+            }
+        }
+        invalidateScreenCache()
+        invalidate()
+    }
+
+    /** 表示中のページの目隠しをすべて削除する。削除した数を返す */
+    fun deleteCoversOnVisiblePage(): Int {
+        val page = document?.pages?.getOrNull(getCurrentVisiblePageNumber() - 1) ?: return 0
+        val count = page.strokes.count { it.isMask }
+        if (count == 0) return 0
+        page.saveSnapshot()
+        page.strokes.removeAll { it.isMask }
+        invalidateScreenCache()
+        clearLassoSelection()
+        invalidate()
+        onContentChanged?.invoke()
+        return count
+    }
+
+    private fun handleCoverTouch(event: MotionEvent, pageIdx: Int, pagePt: NotePoint): Boolean {
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                if (selectedStrokeIds.isNotEmpty()) clearLassoSelection()
+                coverPageIndex = pageIdx
+                coverStart = pagePt
+                coverCurrent = pagePt
+                invalidate()
+            }
+            MotionEvent.ACTION_MOVE -> {
+                val (_, pt) = screenToPageCoordinates(event.x, event.y, fixedPageIndex = coverPageIndex)
+                coverCurrent = pt
+                invalidate()
+            }
+            MotionEvent.ACTION_UP -> {
+                val start = coverStart
+                val end = coverCurrent
+                coverStart = null
+                coverCurrent = null
+                val page = document?.pages?.getOrNull(coverPageIndex)
+                if (start != null && end != null && page != null) {
+                    val w = abs(end.x - start.x)
+                    val h = abs(end.y - start.y)
+                    if (w < 14f && h < 14f) {
+                        handleCoverTap(page, end)
+                    } else if (w >= 20f && h >= 20f) {
+                        page.saveSnapshot()
+                        page.strokes.add(
+                            Stroke(
+                                points = Stroke.generateShapePoints(start, end, ShapeMode.MASK),
+                                color = MASK_COLOR,
+                                strokeWidth = 2f,
+                                toolType = ToolType.PEN,
+                                shapeMode = ShapeMode.MASK
+                            )
+                        )
+                        activePageIndex = coverPageIndex
+                        invalidateScreenCache()
+                        onContentChanged?.invoke()
+                    }
+                }
+                invalidate()
+            }
+            MotionEvent.ACTION_CANCEL -> {
+                coverStart = null
+                coverCurrent = null
+                invalidate()
+            }
+        }
+        return true
+    }
+
+    /** 目隠しをタップ: 開け閉め。開いている目隠しの右上×をタップ: 削除 */
+    private fun handleCoverTap(page: Page, pt: NotePoint) {
+        for (i in page.strokes.indices.reversed()) {
+            val stroke = page.strokes[i]
+            if (!stroke.isMask) continue
+            val box = stroke.shapeBox()
+            val isRevealed = stroke.id in revealedMaskIds
+            if (isRevealed &&
+                hypot((pt.x - box.right).toDouble(), (pt.y - box.top).toDouble()) <= MASK_BADGE_RADIUS + 14f
+            ) {
+                page.saveSnapshot()
+                page.strokes.removeAt(i)
+                revealedMaskIds.remove(stroke.id)
+                activePageIndex = coverPageIndex
+                invalidateScreenCache()
+                onContentChanged?.invoke()
+                return
+            }
+            if (box.contains(pt.x, pt.y)) {
+                if (isRevealed) revealedMaskIds.remove(stroke.id) else revealedMaskIds.add(stroke.id)
+                invalidateScreenCache()
+                return
+            }
+        }
+    }
+
+    /** 選択中のものが「回転していないXY軸ひとつ」のとき、そのStrokeを返す（原点ハンドル用） */
+    private fun singleSelectedAxes(page: Page?): Stroke? {
+        if (page == null || selectedStrokeIds.size != 1) return null
+        val stroke = page.strokes.firstOrNull { it.id in selectedStrokeIds } ?: return null
+        return if (stroke.shapeMode == ShapeMode.XY_AXES_SHAPE && abs(stroke.rotationDeg) < 0.5f) stroke else null
     }
 
     private fun drawSingleStroke(canvas: Canvas, stroke: Stroke) {
@@ -1113,6 +1343,10 @@ class LectureCanvasView @JvmOverloads constructor(
 
         if (isErasing) {
             return handleEraserTouch(event)
+        }
+
+        if (currentTool == ToolType.COVER) {
+            return handleCoverTouch(event, pageIdx, pagePt)
         }
 
         if (currentTool == ToolType.LASER_POINTER) {
@@ -1330,11 +1564,14 @@ class LectureCanvasView @JvmOverloads constructor(
                 val page = document?.pages?.getOrNull(activePageIndex)
                 if (page != null && currentPoints.isNotEmpty()) {
                     page.saveSnapshot()
+                    val isAxes = snappedShapeMode == ShapeMode.XY_AXES_SHAPE
                     val finalPoints = if (snappedShapeMode != null && currentPoints.size >= 2) {
                         Stroke.generateShapePoints(
                             currentPoints.first(),
                             currentPoints.last(),
-                            snappedShapeMode!!
+                            snappedShapeMode!!,
+                            if (isAxes) axesOriginFx else 0.5f,
+                            if (isAxes) axesOriginFy else 0.5f
                         )
                     } else {
                         currentPoints.toList()
@@ -1345,7 +1582,9 @@ class LectureCanvasView @JvmOverloads constructor(
                         strokeWidth = currentStrokeWidth,
                         toolType = if (currentTool == ToolType.HIGHLIGHTER) ToolType.HIGHLIGHTER else ToolType.PEN,
                         shapeMode = snappedShapeMode,
-                        isDashed = isDashedLine && currentTool != ToolType.HIGHLIGHTER
+                        isDashed = isDashedLine && currentTool != ToolType.HIGHLIGHTER,
+                        originFx = if (isAxes) axesOriginFx else 0.5f,
+                        originFy = if (isAxes) axesOriginFy else 0.5f
                     )
                     page.strokes.add(newStroke)
                     appendStrokeToScreenCache(activePageIndex, newStroke)
@@ -1391,7 +1630,7 @@ class LectureCanvasView @JvmOverloads constructor(
     private fun rebuildCurrentPreviewPath() {
         currentPath.reset()
         if (currentPoints.isEmpty()) return
-        val built = Stroke.buildStrokePath(currentPoints, snappedShapeMode)
+        val built = Stroke.buildStrokePath(currentPoints, snappedShapeMode, 0f, axesOriginFx, axesOriginFy)
         currentPath.set(built)
     }
 
@@ -1444,13 +1683,13 @@ class LectureCanvasView @JvmOverloads constructor(
         if (page.strokes.isEmpty()) return
 
         if (eraserMode == EraserMode.STROKE) {
-            val hitExists = page.strokes.any { it.intersects(x2, y2, threshold = eraserRadius) }
+            val hitExists = page.strokes.any { !it.isMask && it.intersects(x2, y2, threshold = eraserRadius) }
             if (hitExists) {
                 if (!hasSavedUndoForCurrentAction) {
                     page.saveSnapshot()
                     hasSavedUndoForCurrentAction = true
                 }
-                page.strokes.removeAll { it.intersects(x2, y2, threshold = eraserRadius) }
+                page.strokes.removeAll { !it.isMask && it.intersects(x2, y2, threshold = eraserRadius) }
                 activePageIndex = pageIdx
                 invalidateScreenCache()
             }
@@ -1496,6 +1735,18 @@ class LectureCanvasView @JvmOverloads constructor(
             MotionEvent.ACTION_DOWN -> {
                 val bounds = selectionBounds
                 if (pageIdx == lassoPageIndex && selectedStrokeIds.isNotEmpty() && bounds != null) {
+                    // 0. XY軸の原点ハンドルのヒット判定
+                    val axes = singleSelectedAxes(page)
+                    if (axes != null) {
+                        val o = axes.axesOriginPoint()
+                        if (hypot((pagePt.x - o.x).toDouble(), (pagePt.y - o.y).toDouble()) <= HANDLE_HIT_RADIUS) {
+                            page.saveSnapshot()
+                            lassoDragMode = LassoDragMode.AXES_ORIGIN
+                            invalidate()
+                            return true
+                        }
+                    }
+
                     // 1. 回転ハンドルのヒット判定
                     val rotX = bounds.centerX()
                     val rotY = bounds.top - ROTATE_HANDLE_OFFSET
@@ -1634,6 +1885,22 @@ class LectureCanvasView @JvmOverloads constructor(
                         invalidate()
                     }
 
+                    LassoDragMode.AXES_ORIGIN -> {
+                        val idx = page.strokes.indexOfFirst { it.id in selectedStrokeIds }
+                        if (idx >= 0) {
+                            val s = page.strokes[idx]
+                            val box = s.shapeBox()
+                            if (box.width() > 1f && box.height() > 1f) {
+                                page.strokes[idx] = s.withAxesOrigin(
+                                    (currPt.x - box.left) / box.width(),
+                                    (currPt.y - box.top) / box.height()
+                                )
+                                invalidateScreenCache()
+                                invalidate()
+                            }
+                        }
+                    }
+
                     LassoDragMode.DRAW_LASSO -> {
                         lassoPoints.add(currPt)
                         lassoPath.lineTo(currPt.x, currPt.y)
@@ -1647,7 +1914,7 @@ class LectureCanvasView @JvmOverloads constructor(
 
             MotionEvent.ACTION_UP -> {
                 when (lassoDragMode) {
-                    LassoDragMode.MOVE, LassoDragMode.SCALE, LassoDragMode.ROTATE -> {
+                    LassoDragMode.MOVE, LassoDragMode.SCALE, LassoDragMode.ROTATE, LassoDragMode.AXES_ORIGIN -> {
                         lassoDragMode = LassoDragMode.NONE
                         lastDragDocPoint = null
                         originalSelectedStrokes = emptyMap()
