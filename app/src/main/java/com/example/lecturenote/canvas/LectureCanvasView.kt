@@ -1,6 +1,9 @@
 package com.example.lecturenote.canvas
 
 import android.content.Context
+import android.graphics.PixelFormat
+import android.view.Gravity
+import android.view.WindowManager
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
@@ -24,6 +27,8 @@ import com.example.lecturenote.model.ShapeMode
 import com.example.lecturenote.model.Stroke
 import com.example.lecturenote.model.ToolType
 import kotlin.math.abs
+import kotlin.math.ceil
+import kotlin.math.floor
 import kotlin.math.atan2
 import kotlin.math.hypot
 import kotlin.math.max
@@ -427,6 +432,7 @@ class LectureCanvasView @JvmOverloads constructor(
     }
 
     override fun onDetachedFromWindow() {
+        removeAllPrivatePanels()
         super.onDetachedFromWindow()
         mainHandler.removeCallbacks(laserFadeRunnable)
         releaseScreenCache()
@@ -784,7 +790,11 @@ class LectureCanvasView @JvmOverloads constructor(
         }
     }
 
-    private fun renderVectorDocumentToCanvas(canvas: Canvas, doc: LectureNoteDocument) {
+    private fun renderVectorDocumentToCanvas(
+        canvas: Canvas,
+        doc: LectureNoteDocument,
+        drawMasks: Boolean = true
+    ) {
         canvas.drawColor(canvasBgColor)
 
         canvas.save()
@@ -854,7 +864,7 @@ class LectureCanvasView @JvmOverloads constructor(
             // 目隠しはすべての書き込みの上に描く
             for (i in 0 until page.strokes.size) {
                 val stroke = page.strokes[i]
-                if (stroke.isMask && RectF.intersects(visiblePageDocRect, stroke.bounds)) {
+                if (drawMasks && stroke.isMask && RectF.intersects(visiblePageDocRect, stroke.bounds)) {
                     drawMask(canvas, stroke)
                 }
             }
@@ -1019,6 +1029,196 @@ class LectureCanvasView @JvmOverloads constructor(
 
             canvas.restore()
         }
+
+        syncPrivatePanels()
+    }
+
+    // -----------------------------------------------------------------------
+    // 【試作】配信では隠し、手元にだけ見せる目隠し
+    //
+    // 目隠し自体は今までどおり本体の画面に塗りつぶしで描く（＝画面共有に映るのは塗りつぶし）。
+    // そのうえで、目隠しと同じ位置に「画面共有・録画には映らない(FLAG_SECURE)」小さな窓を重ね、
+    // その窓の中にだけ隠した内容を描く。手元では中身が見え、配信先には黒い四角として映る想定。
+    // -----------------------------------------------------------------------
+
+    /** true のあいだ、開いていない目隠しの中身を手元にだけ表示する */
+    var isPrivateCoverMode: Boolean = false
+        set(value) {
+            if (field != value) {
+                field = value
+                invalidate()
+            }
+        }
+
+    private val privatePanels = HashMap<String, PrivatePanelView>()
+    private val locationInWindow = IntArray(2)
+
+    /** 動作確認用: いま重ねている「手元だけ表示」の窓の数 */
+    val privatePanelCount: Int get() = privatePanels.size
+
+    private val privateBorderPaint = Paint().apply {
+        isAntiAlias = true
+        style = Paint.Style.STROKE
+        strokeWidth = 4f
+        color = Color.parseColor("#F59E0B")
+        pathEffect = DashPathEffect(floatArrayOf(16f, 10f), 0f)
+    }
+    private val privateTintPaint = Paint().apply {
+        style = Paint.Style.FILL
+        color = Color.parseColor("#14F59E0B")
+    }
+    private val privateLabelBgPaint = Paint().apply {
+        isAntiAlias = true
+        style = Paint.Style.FILL
+        color = Color.parseColor("#F59E0B")
+    }
+    private val privateLabelTextPaint = Paint().apply {
+        isAntiAlias = true
+        color = Color.WHITE
+        textSize = 22f
+        typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+    }
+
+    private inner class PrivatePanelView(context: Context) : View(context) {
+        /** この窓の左上が、キャンバス上のどこに当たるか */
+        var offsetX: Float = 0f
+        var offsetY: Float = 0f
+
+        override fun onDraw(canvas: Canvas) {
+            val doc = document ?: return
+            canvas.save()
+            canvas.translate(-offsetX, -offsetY)
+            renderVectorDocumentToCanvas(canvas, doc, drawMasks = false)
+            drawLiveStroke(canvas)
+            canvas.restore()
+
+            // 「ここは配信に映っていない」と手元で分かるよう、枠とラベルを付ける
+            canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), privateTintPaint)
+            canvas.drawRect(2f, 2f, width - 2f, height - 2f, privateBorderPaint)
+            val label = "配信では非表示"
+            val textWidth = privateLabelTextPaint.measureText(label)
+            if (width > textWidth + 40f && height > 60f) {
+                canvas.drawRoundRect(4f, 4f, textWidth + 24f, 38f, 8f, 8f, privateLabelBgPaint)
+                canvas.drawText(label, 14f, 29f, privateLabelTextPaint)
+            }
+        }
+    }
+
+    /** 書いている途中の線（ペンを離す前）を、手元だけの窓にも描く */
+    private fun drawLiveStroke(canvas: Canvas) {
+        if (currentPoints.isEmpty()) return
+        val isDrawingTool = currentTool == ToolType.PEN || currentTool == ToolType.HIGHLIGHTER ||
+            currentTool == ToolType.LINE_SHAPE || currentTool == ToolType.XY_AXES
+        if (!isDrawingTool) return
+        canvas.save()
+        canvas.translate(panX, panY)
+        canvas.scale(scaleFactor, scaleFactor)
+        canvas.translate(0f, activePageIndex * (PAGE_HEIGHT + PAGE_GAP))
+        applyPaintSettings(
+            paint = strokePaint,
+            tool = currentTool,
+            color = currentColor,
+            width = currentStrokeWidth,
+            isDashed = isDashedLine && currentTool != ToolType.HIGHLIGHTER
+        )
+        canvas.drawPath(currentPath, strokePaint)
+        canvas.restore()
+    }
+
+    /** 目隠しの位置に合わせて、手元だけの窓を追加・移動・削除する（描画のたびに呼ぶ） */
+    private fun syncPrivatePanels() {
+        val doc = document
+        val token = windowToken
+        if (!isPrivateCoverMode || doc == null || token == null || !isAttachedToWindow) {
+            removeAllPrivatePanels()
+            return
+        }
+        val wm = context.getSystemService(Context.WINDOW_SERVICE) as? WindowManager ?: return
+        getLocationInWindow(locationInWindow)
+        val stillNeeded = HashSet<String>()
+
+        for ((pageIdx, page) in doc.pages.withIndex()) {
+            val pageTop = pageIdx * (PAGE_HEIGHT + PAGE_GAP)
+            for (stroke in page.strokes) {
+                if (!stroke.isMask || stroke.id in revealedMaskIds) continue
+                val box = stroke.shapeBox()
+                val left = max(0, floor(panX + box.left * scaleFactor).toInt())
+                val top = max(0, floor(panY + (pageTop + box.top) * scaleFactor).toInt())
+                val right = min(width, ceil(panX + box.right * scaleFactor).toInt())
+                val bottom = min(height, ceil(panY + (pageTop + box.bottom) * scaleFactor).toInt())
+                if (right - left < 8 || bottom - top < 8) continue
+
+                val x = locationInWindow[0] + left
+                val y = locationInWindow[1] + top
+                val w = right - left
+                val h = bottom - top
+                var panel = privatePanels[stroke.id]
+                try {
+                    if (panel == null) {
+                        panel = PrivatePanelView(context)
+                        val lp = WindowManager.LayoutParams(
+                            w, h,
+                            WindowManager.LayoutParams.TYPE_APPLICATION_PANEL,
+                            WindowManager.LayoutParams.FLAG_SECURE or
+                                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                            PixelFormat.OPAQUE
+                        ).apply {
+                            this.token = token
+                            gravity = Gravity.TOP or Gravity.START
+                            this.x = x
+                            this.y = y
+                            windowAnimations = 0
+                            title = "LectureNotePrivateCover"
+                        }
+                        wm.addView(panel, lp)
+                        privatePanels[stroke.id] = panel
+                    } else {
+                        val lp = panel.layoutParams as WindowManager.LayoutParams
+                        if (lp.x != x || lp.y != y || lp.width != w || lp.height != h) {
+                            lp.x = x
+                            lp.y = y
+                            lp.width = w
+                            lp.height = h
+                            wm.updateViewLayout(panel, lp)
+                        }
+                    }
+                } catch (e: Exception) {
+                    // 窓を出せない端末では、通常の目隠し（塗りつぶし）のまま動く
+                    e.printStackTrace()
+                    continue
+                }
+                panel.offsetX = left.toFloat()
+                panel.offsetY = top.toFloat()
+                panel.invalidate()
+                stillNeeded.add(stroke.id)
+            }
+        }
+
+        val iterator = privatePanels.entries.iterator()
+        while (iterator.hasNext()) {
+            val entry = iterator.next()
+            if (entry.key !in stillNeeded) {
+                try {
+                    wm.removeViewImmediate(entry.value)
+                } catch (_: Exception) {
+                }
+                iterator.remove()
+            }
+        }
+    }
+
+    private fun removeAllPrivatePanels() {
+        if (privatePanels.isEmpty()) return
+        val wm = context.getSystemService(Context.WINDOW_SERVICE) as? WindowManager
+        for (panel in privatePanels.values) {
+            try {
+                wm?.removeViewImmediate(panel)
+            } catch (_: Exception) {
+            }
+        }
+        privatePanels.clear()
     }
 
     private fun drawLaserPointerOverlay(canvas: Canvas) {

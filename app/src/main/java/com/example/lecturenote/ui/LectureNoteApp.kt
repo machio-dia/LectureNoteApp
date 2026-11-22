@@ -80,6 +80,9 @@ fun LectureNoteApp(viewModel: NoteViewModel) {
         uiPrefs.edit().putString("tool_bar_placement", it.name).apply()
     }
     var showNoteSwitcher by remember { mutableStateOf(false) }
+
+    // 【試作】範囲の目隠しを「配信では隠し、手元には見せる」モード
+    var isPrivateCoverMode by remember { mutableStateOf(uiPrefs.getBoolean("private_cover_mode", false)) }
     var isCoverVisible by remember { mutableStateOf(false) }
 
     // ダイアログの状態
@@ -195,6 +198,14 @@ fun LectureNoteApp(viewModel: NoteViewModel) {
                         timer = timer,
                         isCoverVisible = isCoverVisible,
                         isRangeCoverActive = uiState.currentTool == ToolType.COVER,
+                        isPrivateCoverMode = isPrivateCoverMode,
+                        onTogglePrivateCoverMode = {
+                            isPrivateCoverMode = !isPrivateCoverMode
+                            uiPrefs.edit().putBoolean("private_cover_mode", isPrivateCoverMode).apply()
+                            if (isPrivateCoverMode) {
+                                viewModel.showMessage("目隠しの中身を手元にだけ表示します。配信先で黒く映っているか確認してください")
+                            }
+                        },
                         isToolBarVisible = isToolBarVisible,
                         toolBarPlacement = toolBarPlacement,
                         onStartRangeCover = { viewModel.setTool(ToolType.COVER) },
@@ -317,6 +328,7 @@ fun LectureNoteApp(viewModel: NoteViewModel) {
                         view.isZoomLocked = uiState.isZoomLocked
                         view.axesOriginFx = uiState.axesOriginFx
                         view.axesOriginFy = uiState.axesOriginFy
+                        view.isPrivateCoverMode = isPrivateCoverMode
 
                         if (uiState.currentTool == ToolType.HIGHLIGHTER) {
                             view.currentColor = uiState.selectedHlColorInt
