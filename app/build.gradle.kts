@@ -14,7 +14,7 @@ android {
         targetSdk = 35
         // GitHub Actions のビルド番号で自動的に増やす（ローカルビルド時は 1）
         versionCode = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInt()
-        versionName = "4.1.0"
+        versionName = "4.2.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

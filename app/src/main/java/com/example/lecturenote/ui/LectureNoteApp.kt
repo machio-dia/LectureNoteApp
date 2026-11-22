@@ -1,5 +1,6 @@
 package com.example.lecturenote.ui
 
+import android.content.Context
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -55,7 +56,30 @@ fun LectureNoteApp(viewModel: NoteViewModel) {
     // 授業サポート機能の状態（ホームに戻ってもタイマーは動き続ける）
     val timer = remember { LessonTimerState() }
     LessonTimerDriver(timer)
-    var isFullscreen by remember { mutableStateOf(false) }
+
+    // バーの表示状態と置き場所（次回起動時も同じ状態で始まる）
+    val uiPrefs = remember { context.getSharedPreferences("lecture_note_ui_prefs", Context.MODE_PRIVATE) }
+    var isFileBarVisible by remember { mutableStateOf(uiPrefs.getBoolean("file_bar_visible", true)) }
+    var isToolBarVisible by remember { mutableStateOf(uiPrefs.getBoolean("tool_bar_visible", true)) }
+    var toolBarPlacement by remember {
+        mutableStateOf(
+            runCatching { ToolBarPlacement.valueOf(uiPrefs.getString("tool_bar_placement", null) ?: "TOP") }
+                .getOrDefault(ToolBarPlacement.TOP)
+        )
+    }
+    val setFileBarVisible: (Boolean) -> Unit = {
+        isFileBarVisible = it
+        uiPrefs.edit().putBoolean("file_bar_visible", it).apply()
+    }
+    val setToolBarVisible: (Boolean) -> Unit = {
+        isToolBarVisible = it
+        uiPrefs.edit().putBoolean("tool_bar_visible", it).apply()
+    }
+    val setToolBarPlacement: (ToolBarPlacement) -> Unit = {
+        toolBarPlacement = it
+        uiPrefs.edit().putString("tool_bar_placement", it.name).apply()
+    }
+    var showNoteSwitcher by remember { mutableStateOf(false) }
     var isCoverVisible by remember { mutableStateOf(false) }
 
     // ダイアログの状態
@@ -91,7 +115,6 @@ fun LectureNoteApp(viewModel: NoteViewModel) {
     }
 
     val goHome: () -> Unit = {
-        isFullscreen = false
         isCoverVisible = false
         viewModel.openLandingPage()
     }
@@ -111,7 +134,7 @@ fun LectureNoteApp(viewModel: NoteViewModel) {
 
     // 授業中に「戻る」でアプリが閉じてしまわないよう、編集画面ではホームへ戻る動作にする
     BackHandler(enabled = !uiState.isShowingLandingPage) {
-        if (isFullscreen) isFullscreen = false else goHome()
+        goHome()
     }
 
     if (uiState.isShowingLandingPage) {
@@ -121,10 +144,10 @@ fun LectureNoteApp(viewModel: NoteViewModel) {
                 .background(AppColors.AppBackground)
                 .statusBarsPadding()
         ) {
-            HomeScreen(
+            TutorLandingPage(
                 uiState = uiState,
                 onResumeActiveNote = { viewModel.resumeActiveNote() },
-                onStartLesson = { student, subject, template ->
+                onQuickCreateTodayNote = { student, subject, template ->
                     val now = Date()
                     viewModel.createNewNote(
                         studentName = student,
@@ -134,13 +157,17 @@ fun LectureNoteApp(viewModel: NoteViewModel) {
                         template = template
                     )
                 },
-                onOpenDetailedNewNote = { prefill ->
+                onOpenCustomNewNoteDialog = { prefill ->
                     noteInfoRequest = NoteInfoRequest.NewNote(prefill.ifBlank { null })
                 },
-                onOpenNote = { docId -> viewModel.switchNoteDocument(docId) },
-                onExportPdf = exportPdf,
-                onDeleteNote = { summary -> pendingDeleteNote = summary },
-                onOpenSettings = { showSettings = true }
+                onSelectNoteFromList = { docId -> viewModel.switchNoteDocument(docId) },
+                onExportNoteSummaryToPdf = exportPdf,
+                onRequestDeleteNoteSummary = { summary -> pendingDeleteNote = summary },
+                onSelectExportFolder = {
+                    pendingExportDocId = null
+                    folderPickerLauncher.launch(null)
+                },
+                onOpenStylusKeyConfig = { viewModel.setListeningForStylusKey(true) }
             )
         }
     } else {
@@ -158,19 +185,22 @@ fun LectureNoteApp(viewModel: NoteViewModel) {
                 .statusBarsPadding()
         ) {
             AnimatedVisibility(
-                visible = !isFullscreen,
+                visible = isFileBarVisible,
                 enter = expandVertically(),
                 exit = shrinkVertically()
             ) {
                 Column {
-                    EditorTopBar(
+                    EditorFileBar(
                         uiState = uiState,
                         timer = timer,
                         isCoverVisible = isCoverVisible,
                         isRangeCoverActive = uiState.currentTool == ToolType.COVER,
+                        isToolBarVisible = isToolBarVisible,
+                        toolBarPlacement = toolBarPlacement,
                         onStartRangeCover = { viewModel.setTool(ToolType.COVER) },
                         onHome = goHome,
                         onEditInfo = { noteInfoRequest = NoteInfoRequest.EditCurrent },
+                        onOpenNoteSwitcher = { showNoteSwitcher = true },
                         onToggleCover = { isCoverVisible = !isCoverVisible },
                         onUndo = { canvasViewRef?.undo() },
                         onRedo = { canvasViewRef?.redo() },
@@ -178,12 +208,14 @@ fun LectureNoteApp(viewModel: NoteViewModel) {
                         onAddPage = addPage,
                         onZoomMinus = { canvasViewRef?.adjustZoomByPercentDelta(-10) },
                         onZoomPlus = { canvasViewRef?.adjustZoomByPercentDelta(10) },
-                        onZoomFit = { canvasViewRef?.resetZoomToFitWidth() },
+                        onSetZoomPercent = { canvasViewRef?.setZoomPercent(it) },
                         onToggleZoomLock = {
                             viewModel.toggleZoomLock()
                             canvasViewRef?.isZoomLocked = !uiState.isZoomLocked
                         },
-                        onEnterFullscreen = { isFullscreen = true },
+                        onHideFileBar = { setFileBarVisible(false) },
+                        onSetToolBarVisible = setToolBarVisible,
+                        onSetToolBarPlacement = setToolBarPlacement,
                         onChangeTemplate = { showTemplatePicker = true },
                         onExportPdf = { exportPdf(uiState.activeDocument.id) },
                         onToggleStylusOnly = {
@@ -202,8 +234,17 @@ fun LectureNoteApp(viewModel: NoteViewModel) {
                         onDeleteNote = { pendingDeleteNote = uiState.activeDocument.toSummary() }
                     )
                     HorizontalDivider(color = AppColors.Line)
+                }
+            }
+            AnimatedVisibility(
+                visible = isToolBarVisible && toolBarPlacement == ToolBarPlacement.TOP,
+                enter = expandVertically(),
+                exit = shrinkVertically()
+            ) {
+                Column {
                     EditorToolBar(
                         uiState = uiState,
+                        placement = toolBarPlacement,
                         onSelectTool = { viewModel.setTool(it) },
                         onSelectPenColor = { viewModel.setPenColor(it) },
                         onSelectPenWidth = { viewModel.setPenWidth(it) },
@@ -223,7 +264,9 @@ fun LectureNoteApp(viewModel: NoteViewModel) {
                         },
                         onSelectPreset = { viewModel.selectPenPreset(it) },
                         onRegisterPreset = { viewModel.registerCurrentSettingToPenBox() },
-                        onDeletePreset = { viewModel.removePenPreset(it) }
+                        onDeletePreset = { viewModel.removePenPreset(it) },
+                        onSetPlacement = setToolBarPlacement,
+                        onHide = { setToolBarVisible(false) }
                     )
                     HorizontalDivider(color = AppColors.Line)
                 }
@@ -311,21 +354,60 @@ fun LectureNoteApp(viewModel: NoteViewModel) {
                         },
                         modifier = Modifier
                             .align(Alignment.TopCenter)
-                            .padding(top = if (isFullscreen) 64.dp else 12.dp)
+                            .padding(top = if (!isFileBarVisible || !isToolBarVisible) 56.dp else 12.dp)
                     )
                 }
 
-                if (isFullscreen) {
-                    FullscreenControls(
+                // ツールバーを左右に置くとき: 用紙の余白に浮かせる（用紙の位置や幅は変えない）
+                if (isToolBarVisible && toolBarPlacement != ToolBarPlacement.TOP) {
+                    EditorToolBar(
+                        uiState = uiState,
+                        placement = toolBarPlacement,
+                        onSelectTool = { viewModel.setTool(it) },
+                        onSelectPenColor = { viewModel.setPenColor(it) },
+                        onSelectPenWidth = { viewModel.setPenWidth(it) },
+                        onToggleDashedLine = { viewModel.setDashedLine(it) },
+                        onSelectHlColor = { viewModel.setHighlighterColor(it) },
+                        onSelectShapeMode = { viewModel.setShapeMode(it) },
+                        onSelectEraserMode = { viewModel.setEraserMode(it) },
+                        onSelectEraserRadius = { viewModel.setEraserRadius(it) },
+                        onRequestClearPage = { showClearPageConfirm = true },
+                        onSelectAxesOrigin = { fx, fy -> viewModel.setAxesOrigin(fx, fy) },
+                        onSetAllCoversRevealed = { canvasViewRef?.setAllCoversRevealed(it) },
+                        onDeleteCoversOnPage = {
+                            val removed = canvasViewRef?.deleteCoversOnVisiblePage() ?: 0
+                            viewModel.showMessage(
+                                if (removed > 0) "目隠しを${removed}個削除しました（「元に戻す」で復元できます）" else "このページに目隠しはありません"
+                            )
+                        },
+                        onSelectPreset = { viewModel.selectPenPreset(it) },
+                        onRegisterPreset = { viewModel.registerCurrentSettingToPenBox() },
+                        onDeletePreset = { viewModel.removePenPreset(it) },
+                        onSetPlacement = setToolBarPlacement,
+                        onHide = { setToolBarVisible(false) },
+                        modifier = Modifier
+                            .align(if (toolBarPlacement == ToolBarPlacement.LEFT) Alignment.CenterStart else Alignment.CenterEnd)
+                            .padding(horizontal = 6.dp, vertical = 8.dp)
+                    )
+                }
+
+                if (!isFileBarVisible || !isToolBarVisible) {
+                    HiddenBarHandles(
+                        isFileBarHidden = !isFileBarVisible,
+                        isToolBarHidden = !isToolBarVisible,
                         canUndo = uiState.canUndo,
                         canRedo = uiState.canRedo,
                         timerText = if (timer.isActive) timer.displayText else null,
                         onUndo = { canvasViewRef?.undo() },
                         onRedo = { canvasViewRef?.redo() },
-                        onExit = { isFullscreen = false },
+                        onShowFileBar = { setFileBarVisible(true) },
+                        onShowToolBar = { setToolBarVisible(true) },
+                        // 右側にツールバーがあるときは重ならないよう左上に出す
                         modifier = Modifier
-                            .align(Alignment.TopEnd)
-                            .padding(12.dp)
+                            .align(
+                                if (isToolBarVisible && toolBarPlacement == ToolBarPlacement.RIGHT) Alignment.TopStart else Alignment.TopEnd
+                            )
+                            .padding(8.dp)
                     )
                 }
 
@@ -448,6 +530,24 @@ fun LectureNoteApp(viewModel: NoteViewModel) {
                 }
                 noteInfoRequest = null
             }
+        )
+    }
+
+    if (showNoteSwitcher && !uiState.isShowingLandingPage) {
+        StudentGroupedNotesDialog(
+            noteSummaries = uiState.noteSummaries,
+            activeDocId = uiState.activeDocument.id,
+            currentStudent = uiState.activeDocument.metadata.studentName,
+            onSelectDocument = { docId ->
+                viewModel.switchNoteDocument(docId)
+                showNoteSwitcher = false
+            },
+            onCreateNewNoteForStudent = { studentName ->
+                showNoteSwitcher = false
+                noteInfoRequest = NoteInfoRequest.NewNote(studentName.ifBlank { null })
+            },
+            onRequestDeleteDocument = { summary -> pendingDeleteNote = summary },
+            onDismiss = { showNoteSwitcher = false }
         )
     }
 
