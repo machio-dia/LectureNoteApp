@@ -45,6 +45,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -456,4 +457,38 @@ fun StylusButtonConfigDialog(
             TextButton(onClick = onTestToggleEraser) { Text("切り替えをテスト") }
         }
     )
+}
+
+@Composable
+fun ChoiceChip(label: String, selected: Boolean, onClick: () -> Unit, count: Int? = null) {
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(12.dp),
+        color = if (selected) AppColors.Accent else AppColors.Surface,
+        border = if (selected) null else BorderStroke(1.dp, AppColors.LineStrong)
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .height(40.dp)
+                .padding(horizontal = 14.dp)
+        ) {
+            Text(
+                label,
+                fontSize = 14.sp,
+                fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                color = if (selected) Color.White else AppColors.Ink,
+                maxLines = 1
+            )
+            if (count != null) {
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    "$count",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = if (selected) Color.White.copy(alpha = 0.8f) else AppColors.InkFaint
+                )
+            }
+        }
+    }
 }

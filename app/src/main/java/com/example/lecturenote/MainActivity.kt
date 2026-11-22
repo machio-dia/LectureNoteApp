@@ -7,6 +7,9 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import com.example.lecturenote.ui.LectureNoteApp
 import com.example.lecturenote.ui.theme.LectureNoteTheme
 import com.example.lecturenote.viewmodel.NoteViewModel
@@ -18,11 +21,25 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        hideNavigationBar()
         setContent {
             LectureNoteTheme {
                 LectureNoteApp(viewModel = viewModel)
             }
         }
+    }
+
+    /** 下部のナビゲーションバー（戻る・ホーム）を隠す。画面下端からのスワイプで一時的に表示される */
+    private fun hideNavigationBar() {
+        WindowCompat.getInsetsController(window, window.decorView).apply {
+            systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            hide(WindowInsetsCompat.Type.navigationBars())
+        }
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) hideNavigationBar()
     }
 
     override fun onStop() {

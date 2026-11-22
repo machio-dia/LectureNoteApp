@@ -54,6 +54,7 @@ class LectureCanvasView @JvmOverloads constructor(
         private const val LASER_TRAIL_LIFETIME_MS = 850L
         private const val ROTATE_HANDLE_OFFSET = 44f
         private const val HANDLE_HIT_RADIUS = 36f
+        const val DEFAULT_ZOOM_PERCENT = 80
         private const val MASK_BADGE_RADIUS = 20f
         private val MASK_COLOR = Color.parseColor("#2A3040")
     }
@@ -403,7 +404,7 @@ class LectureCanvasView @JvmOverloads constructor(
             clearLassoSelection()
             pendingPastePoint = null
             if (width > 0) {
-                resetZoomToFitWidth()
+                resetZoomToDefault()
             } else {
                 isInitialScaleSet = false
             }
@@ -440,7 +441,7 @@ class LectureCanvasView @JvmOverloads constructor(
             minScale = baseFitScale * 0.5f
             maxScale = baseFitScale * 3.0f
             if (!isInitialScaleSet) {
-                resetZoomToFitWidth()
+                resetZoomToDefault()
                 isInitialScaleSet = true
             }
         }
@@ -462,6 +463,27 @@ class LectureCanvasView @JvmOverloads constructor(
         panX = centerX - (centerX - panX) * ratio
         panY = centerY - (centerY - panY) * ratio
         scaleFactor = newScale
+        clampPanBounds()
+        invalidateScreenCache()
+        invalidate()
+        onViewportChanged?.invoke()
+    }
+
+    /** 指定した倍率（幅いっぱい=100%）にする。画面中央に見えている位置は保つ */
+    fun setZoomPercent(targetPercent: Int) {
+        adjustZoomByPercentDelta(targetPercent - getRelativeZoomPercent())
+    }
+
+    /** ノートを開いたときの表示: 既定の倍率で、左右に余白を残して中央に置く */
+    fun resetZoomToDefault() {
+        if (width <= 0) return
+        val horizontalPadding = 20f
+        baseFitScale = ((width - horizontalPadding * 2f) / PAGE_WIDTH).coerceAtLeast(0.3f)
+        minScale = baseFitScale * 0.5f
+        maxScale = baseFitScale * 3.0f
+        scaleFactor = baseFitScale * (DEFAULT_ZOOM_PERCENT / 100f)
+        panX = (width - PAGE_WIDTH * scaleFactor) / 2f
+        panY = 24f
         clampPanBounds()
         invalidateScreenCache()
         invalidate()
