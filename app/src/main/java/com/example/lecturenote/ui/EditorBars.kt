@@ -146,6 +146,8 @@ fun EditorFileBar(
     timer: LessonTimerState,
     isCoverVisible: Boolean,
     isRangeCoverActive: Boolean,
+    isPrivateCoverMode: Boolean,
+    onTogglePrivateCoverMode: () -> Unit,
     isToolBarVisible: Boolean,
     toolBarPlacement: ToolBarPlacement,
     onStartRangeCover: () -> Unit,
@@ -233,8 +235,10 @@ fun EditorFileBar(
                     CoverMenuButton(
                         isSheetVisible = isCoverVisible,
                         isRangeCoverActive = isRangeCoverActive,
+                        isPrivateCoverMode = isPrivateCoverMode,
                         onToggleSheet = onToggleCover,
-                        onStartRangeCover = onStartRangeCover
+                        onStartRangeCover = onStartRangeCover,
+                        onTogglePrivateCoverMode = onTogglePrivateCoverMode
                     )
                     BarDivider(height = 22.dp)
                     BarIconButton(Icons.AutoMirrored.Rounded.Undo, "元に戻す", onUndo, enabled = uiState.canUndo, modifier = small)
@@ -378,8 +382,10 @@ private fun ToolBarPlacementRow(
 private fun CoverMenuButton(
     isSheetVisible: Boolean,
     isRangeCoverActive: Boolean,
+    isPrivateCoverMode: Boolean,
     onToggleSheet: () -> Unit,
-    onStartRangeCover: () -> Unit
+    onStartRangeCover: () -> Unit,
+    onTogglePrivateCoverMode: () -> Unit
 ) {
     var expanded by remember { mutableStateOf(false) }
     Box {
@@ -388,7 +394,7 @@ private fun CoverMenuButton(
             "目隠し",
             { expanded = true },
             modifier = Modifier.size(40.dp),
-            active = isSheetVisible || isRangeCoverActive
+            active = isSheetVisible || isRangeCoverActive || isPrivateCoverMode
         )
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
             DropdownMenuItem(
@@ -422,6 +428,24 @@ private fun CoverMenuButton(
                     expanded = false
                     onStartRangeCover()
                 }
+            )
+            HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+            DropdownMenuItem(
+                text = {
+                    Column {
+                        Text("配信では隠す（試作）", fontSize = 15.sp)
+                        Text(
+                            "範囲の目隠しの中身を、手元にだけ表示する",
+                            fontSize = 12.sp,
+                            color = AppColors.InkSoft
+                        )
+                    }
+                },
+                leadingIcon = { Icon(Icons.Rounded.Visibility, contentDescription = null, tint = AppColors.InkSoft) },
+                trailingIcon = {
+                    Switch(checked = isPrivateCoverMode, onCheckedChange = { onTogglePrivateCoverMode() })
+                },
+                onClick = onTogglePrivateCoverMode
             )
         }
     }
